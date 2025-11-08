@@ -1,0 +1,13 @@
+# Lefthook Configuration
+# See https://github.com/evilmartians/lefthook
+
+pre-commit:
+  commands:
+    sync-version:
+      glob: "manifest.json"
+      run: python scripts/sync_version.py
+
+post-commit:
+  commands:
+    create-and-push-tag:
+      run: python scripts/create_version_tag.py

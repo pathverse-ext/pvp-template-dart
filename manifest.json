@@ -1,0 +1,6 @@
+{
+  "name": "dart_plugin_template",
+  "description": "A template plugin for dart_eval (Dart only)",
+  "version": "0.1.1",
+  "author": "Your Name"
+}

@@ -1,0 +1,14 @@
+{
+    "dispatch": {
+        "enabled": true,
+        "org": "pathverse-ext",
+        "repo": "plugin-index",
+        "event_type": "pvp-plugin-released",
+        "secret_token_name": "PATHVERSE_ACCESS_TOKEN"
+    },
+    "release": {
+        "title_template": "Release {tag}",
+        "notes_template": "Automated release for version {version}",
+        "assets": ["plugin.evc", "manifest.json"]
+    }
+}

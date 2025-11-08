@@ -1,0 +1,178 @@
+name: Build and Release on Tag
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g., v1.0.0)'
+        required: true
+        type: string
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Validate manifest
+        id: validate
+        uses: pathverse-ext/pvp_framework_tester@main
+      
+      - name: Check validation result
+        if: steps.validate.outputs.result == 'failure'
+        run: |
+          echo "❌ Manifest validation failed!"
+          echo "Please fix the validation errors before creating a release."
+          exit 1
+      
+      - name: Set up Dart SDK
+        uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+      
+      - name: Cache Dart dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.pub-cache
+            .dart_tool
+          key: ${{ runner.os }}-dart-${{ hashFiles('**/pubspec.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-dart-
+      
+      - name: Install dependencies
+        run: dart pub get
+      
+      - name: Verify dependencies
+        run: dart pub deps
+      
+      - name: Activate dart_eval
+        run: dart pub global activate dart_eval
+      
+      - name: Build plugin.evc
+        run: dart_eval compile -o plugin.evc
+      
+      - name: Verify plugin.evc exists
+        run: |
+          if [ ! -f "plugin.evc" ]; then
+            echo "Error: plugin.evc was not created"
+            exit 1
+          fi
+          echo "[OK] plugin.evc created successfully"
+          ls -lh plugin.evc
+      
+      - name: Load configuration
+        id: config
+        run: |
+          CONFIG_FILE=".github/config/config.json"
+          
+          if [ ! -f "$CONFIG_FILE" ]; then
+            echo "[!] config.json not found, using defaults"
+            echo "dispatch_enabled=false" >> $GITHUB_OUTPUT
+            echo "release_assets=plugin.evc manifest.json" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Read config values with defaults
+          DISPATCH_ENABLED=$(jq -r '.dispatch.enabled // false' "$CONFIG_FILE")
+          DISPATCH_ORG=$(jq -r '.dispatch.org // "pathverse-ext"' "$CONFIG_FILE")
+          DISPATCH_REPO=$(jq -r '.dispatch.repo // "plugin-index"' "$CONFIG_FILE")
+          DISPATCH_EVENT=$(jq -r '.dispatch.event_type // "pvp-plugin-released"' "$CONFIG_FILE")
+          DISPATCH_SECRET=$(jq -r '.dispatch.secret_token_name // "PATHVERSE_ACCESS_TOKEN"' "$CONFIG_FILE")
+          RELEASE_TITLE=$(jq -r '.release.title_template // "Release {tag}"' "$CONFIG_FILE")
+          RELEASE_NOTES=$(jq -r '.release.notes_template // "Automated release for version {version}"' "$CONFIG_FILE")
+          RELEASE_ASSETS=$(jq -r '.release.assets // ["plugin.evc", "manifest.json"] | join(" ")' "$CONFIG_FILE")
+          
+          # Combine org and repo
+          DISPATCH_REPOSITORY="${DISPATCH_ORG}/${DISPATCH_REPO}"
+          
+          echo "dispatch_enabled=$DISPATCH_ENABLED" >> $GITHUB_OUTPUT
+          echo "dispatch_repo=$DISPATCH_REPOSITORY" >> $GITHUB_OUTPUT
+          echo "dispatch_event=$DISPATCH_EVENT" >> $GITHUB_OUTPUT
+          echo "dispatch_secret=$DISPATCH_SECRET" >> $GITHUB_OUTPUT
+          echo "release_title=$RELEASE_TITLE" >> $GITHUB_OUTPUT
+          echo "release_notes=$RELEASE_NOTES" >> $GITHUB_OUTPUT
+          echo "release_assets=$RELEASE_ASSETS" >> $GITHUB_OUTPUT
+          
+          echo "[OK] Configuration loaded from $CONFIG_FILE"
+          echo "  Dispatch enabled: $DISPATCH_ENABLED"
+          echo "  Target repository: $DISPATCH_REPOSITORY"
+          echo "  Event type: $DISPATCH_EVENT"
+      
+      - name: Check for manifest.json
+        id: check-manifest
+        run: |
+          if [ -f "manifest.json" ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "[OK] manifest.json found"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "[!] manifest.json not found, will create empty one"
+          fi
+      
+      - name: Create empty manifest.json if needed
+        if: steps.check-manifest.outputs.exists == 'false'
+        run: |
+          echo '{}' > manifest.json
+          echo "[OK] Created empty manifest.json"
+      
+      - name: Extract version from tag
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${{ github.ref_name }}"
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Release version: $VERSION (tag: $TAG)"
+      
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          VERSION="${{ steps.version.outputs.version }}"
+          TITLE="${{ steps.config.outputs.release_title }}"
+          NOTES="${{ steps.config.outputs.release_notes }}"
+          ASSETS="${{ steps.config.outputs.release_assets }}"
+          
+          # Replace placeholders in title and notes
+          TITLE="${TITLE//\{tag\}/$TAG}"
+          TITLE="${TITLE//\{version\}/$VERSION}"
+          NOTES="${NOTES//\{tag\}/$TAG}"
+          NOTES="${NOTES//\{version\}/$VERSION}"
+          
+          # Check if release already exists
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "Release $TAG already exists, deleting it first"
+            gh release delete "$TAG" --yes
+          fi
+          
+          # Create release with assets
+          gh release create "$TAG" \
+            --title "$TITLE" \
+            --notes "$NOTES" \
+            $ASSETS
+          
+          echo "[OK] Release $TAG created successfully"
+      
+      - name: Dispatch to plugin index
+        if: steps.config.outputs.dispatch_enabled == 'true'
+        continue-on-error: true
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets[steps.config.outputs.dispatch_secret] }}
+          repository: ${{ steps.config.outputs.dispatch_repo }}
+          event-type: ${{ steps.config.outputs.dispatch_event }}
+          client-payload: '{"repository": "${{ github.repository }}", "tag_name": "${{ steps.version.outputs.tag }}"}'
